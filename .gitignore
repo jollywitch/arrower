@@ -1,0 +1,11 @@
+build/
+build-mingw/
+out/
+*.exe
+*.obj
+*.o
+*.dll
+*.a
+*.so
+*.user
+*.log

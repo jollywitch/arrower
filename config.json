@@ -1,0 +1,19 @@
+{
+  "activation_modifier": "RightCtrl",
+  "bindings": {
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "left_click": "OemPeriod",
+    "right_click": "Oem2"
+  },
+  "movement": {
+    "base_speed_px_per_tick": 6.0,
+    "acceleration_px_per_tick": 0.8,
+    "max_speed_px_per_tick": 28.0,
+    "update_rate_hz": 120,
+    "drag_update_rate_hz": 24,
+    "scroll_update_rate_hz": 18
+  }
+}

@@ -1,0 +1,68 @@
+# arrower
+
+`arrower` is a Windows console utility that lets you control the mouse with the keyboard while holding `Right Ctrl`.
+
+## Default controls
+
+- `Right Ctrl` + `Arrow keys`: move cursor
+- `Right Ctrl` + `.`: hold left button for drag, or tap for a normal left click
+- `Right Ctrl` + `/`: right click
+- `Right Ctrl` + `/` + `Up`/`Down`: scroll vertically
+- `Ctrl` + `Alt` + `Esc`: emergency quit
+
+The default movement loop runs at `120 Hz` with:
+
+- base speed: `6 px/tick`
+- acceleration: `0.8 px/tick`
+- max speed: `28 px/tick`
+- drag rate: `24 Hz`
+- scroll rate: `18 Hz`
+
+## Build
+
+### Windows / MinGW-w64
+
+```bash
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
+```
+
+MinGW builds are linked statically against `libgcc`, `libstdc++`, and `winpthread`, so `arrower.exe` should not require those MinGW DLLs beside the executable.
+
+### Tests
+
+```bash
+cmake -S . -B build -DARROWER_BUILD_TESTS=ON
+cmake --build build --target arrower_tests
+ctest --test-dir build --output-on-failure
+```
+
+On non-Windows hosts, only the cross-platform core and tests are built.
+
+## Config
+
+`arrower` looks for `config.json` next to the executable. If the file is missing, built-in defaults are used.
+
+Example:
+
+```json
+{
+  "activation_modifier": "RightCtrl",
+  "bindings": {
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "left_click": "OemPeriod",
+    "right_click": "Oem2"
+  },
+  "movement": {
+    "base_speed_px_per_tick": 6.0,
+    "acceleration_px_per_tick": 0.8,
+    "max_speed_px_per_tick": 28.0,
+    "update_rate_hz": 120,
+    "drag_update_rate_hz": 24,
+    "scroll_update_rate_hz": 18
+  }
+}
+```
