@@ -17,32 +17,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
         with:
-          version: "6.7.3"
-          arch: win64_msvc2022_64
+          msystem: MINGW64
+          update: true
           cache: true
+          install: >-
+            git
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt6-base
 
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DARROWER_BUILD_TESTS=ON
+        shell: msys2 {0}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARROWER_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --config Release --target arrower arrower_tests
+        shell: msys2 {0}
+        run: cmake --build build --target arrower arrower_tests
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        shell: msys2 {0}
+        run: ctest --test-dir build --output-on-failure
 
       - name: Stage application
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          $ErrorActionPreference = "Stop"
-          $dist = "dist/arrower-${{ github.ref_name }}-windows-x64"
-          New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          Copy-Item "build/Release/arrower.exe" $dist
-          Copy-Item "config.json" $dist
-          windeployqt "$dist/arrower.exe" --release --no-translations
-          Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip" -Force
+          set -euo pipefail
+          dist="dist/arrower-${{ github.ref_name }}-windows-x64"
+          mkdir -p "$dist"
+          cp build/arrower.exe "$dist/"
+          cp config.json "$dist/"
+          windeployqt "$dist/arrower.exe" --release --no-translations --compiler-runtime
+
+      - name: Package application
+        shell: pwsh
+        run: Compress-Archive -Path "dist/arrower-${{ github.ref_name }}-windows-x64/*" -DestinationPath "dist/arrower-${{ github.ref_name }}-windows-x64.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
