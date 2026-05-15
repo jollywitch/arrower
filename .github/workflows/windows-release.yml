@@ -6,7 +6,7 @@ on:
       - "*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -62,3 +62,11 @@ jobs:
           name: arrower-${{ github.ref_name }}-windows-x64
           path: dist/arrower-${{ github.ref_name }}-windows-x64.zip
           if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: arrower ${{ github.ref_name }}
+          files: |
+            dist/arrower-${{ github.ref_name }}-windows-x64.zip
+            dist/arrower-${{ github.ref_name }}-windows-x64/arrower.exe
