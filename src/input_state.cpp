@@ -28,4 +28,10 @@ bool InputState::IsDown(int virtual_key) const {
     return keys_[virtual_key].load();
 }
 
+void InputState::Reset() {
+    for (auto& key : keys_) {
+        key.store(false);
+    }
+}
+
 }  // namespace arrower

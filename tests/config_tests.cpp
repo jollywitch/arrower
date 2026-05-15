@@ -74,3 +74,16 @@ TEST_CASE("invalid key name fails clearly") {
     CHECK_FALSE(result.success);
     CHECK(result.message.find("activation_modifier") != std::string::npos);
 }
+
+TEST_CASE("config serializes and parses round-trip") {
+    const auto original = arrower::DefaultConfig();
+    const auto serialized = arrower::SerializeConfig(original);
+    const auto reparsed = arrower::ParseConfigText(serialized);
+
+    REQUIRE(reparsed.success);
+    CHECK(reparsed.config.activation_modifier == original.activation_modifier);
+    CHECK(reparsed.config.bindings.left_click == original.bindings.left_click);
+    CHECK(reparsed.config.bindings.right_click == original.bindings.right_click);
+    CHECK(reparsed.config.movement.drag_update_rate_hz == original.movement.drag_update_rate_hz);
+    CHECK(reparsed.config.movement.scroll_update_rate_hz == original.movement.scroll_update_rate_hz);
+}

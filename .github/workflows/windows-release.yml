@@ -1,0 +1,52 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows app
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.3"
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DARROWER_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target arrower arrower_tests
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = "dist/arrower-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "build/Release/arrower.exe" $dist
+          Copy-Item "config.json" $dist
+          windeployqt "$dist/arrower.exe" --release --no-translations
+          Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arrower-${{ github.ref_name }}-windows-x64
+          path: dist/arrower-${{ github.ref_name }}-windows-x64.zip
+          if-no-files-found: error

@@ -140,6 +140,31 @@ ConfigLoadResult ParseConfigText(const std::string& text) {
     return {true, false, { *activation_modifier, bindings, movement }, "Loaded config.json"};
 }
 
+std::string SerializeConfig(const Config& config) {
+    picojson::object bindings;
+    bindings["up"] = picojson::value(VirtualKeyName(config.bindings.up));
+    bindings["down"] = picojson::value(VirtualKeyName(config.bindings.down));
+    bindings["left"] = picojson::value(VirtualKeyName(config.bindings.left));
+    bindings["right"] = picojson::value(VirtualKeyName(config.bindings.right));
+    bindings["left_click"] = picojson::value(VirtualKeyName(config.bindings.left_click));
+    bindings["right_click"] = picojson::value(VirtualKeyName(config.bindings.right_click));
+
+    picojson::object movement;
+    movement["base_speed_px_per_tick"] = picojson::value(config.movement.base_speed_px_per_tick);
+    movement["acceleration_px_per_tick"] = picojson::value(config.movement.acceleration_px_per_tick);
+    movement["max_speed_px_per_tick"] = picojson::value(config.movement.max_speed_px_per_tick);
+    movement["update_rate_hz"] = picojson::value(static_cast<double>(config.movement.update_rate_hz));
+    movement["drag_update_rate_hz"] = picojson::value(static_cast<double>(config.movement.drag_update_rate_hz));
+    movement["scroll_update_rate_hz"] = picojson::value(static_cast<double>(config.movement.scroll_update_rate_hz));
+
+    picojson::object root;
+    root["activation_modifier"] = picojson::value(VirtualKeyName(config.activation_modifier));
+    root["bindings"] = picojson::value(bindings);
+    root["movement"] = picojson::value(movement);
+
+    return picojson::value(root).serialize(true);
+}
+
 ConfigLoadResult LoadConfigFile(const std::filesystem::path& path) {
     std::ifstream input(path);
     if (!input.is_open()) {
@@ -154,6 +179,20 @@ ConfigLoadResult LoadConfigFile(const std::filesystem::path& path) {
     }
 
     return result;
+}
+
+ConfigSaveResult SaveConfigFile(const std::filesystem::path& path, const Config& config) {
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        return {false, "Failed to open config for writing: " + path.string()};
+    }
+
+    output << SerializeConfig(config) << '\n';
+    if (!output.good()) {
+        return {false, "Failed to write config: " + path.string()};
+    }
+
+    return {true, "Saved config to " + path.string()};
 }
 
 std::string DescribeConfig(const Config& config) {

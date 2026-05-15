@@ -3,11 +3,6 @@
 #include "arrower/windows_keyboard_hook.hpp"
 
 #include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <mutex>
-#include <sstream>
 #include <thread>
 
 #include "arrower/key_codes.hpp"
@@ -17,28 +12,12 @@ namespace arrower {
 
 namespace {
 
-constexpr UINT kQuitMessage = WM_APP + 1;
-WindowsKeyboardHookApp* g_app = nullptr;
+constexpr UINT kServiceStopMessage = WM_APP + 1;
 constexpr int kGenericCtrl = VK_CONTROL;
 constexpr int kGenericAlt = VK_MENU;
 constexpr DWORD kWheelDelta = 120;
 
-std::filesystem::path LogFilePath() {
-    wchar_t path_buffer[MAX_PATH];
-    const DWORD length = GetModuleFileNameW(nullptr, path_buffer, MAX_PATH);
-    if (length == 0 || length == MAX_PATH) {
-        return std::filesystem::current_path() / "arrower.log";
-    }
-
-    return std::filesystem::path(path_buffer).parent_path() / "arrower.log";
-}
-
-void AppendLogLine(const std::string& line) {
-    static std::mutex log_mutex;
-    const std::lock_guard<std::mutex> lock(log_mutex);
-    std::ofstream output(LogFilePath(), std::ios::app);
-    output << line << '\n';
-}
+WindowsKeyboardHookService* g_service = nullptr;
 
 bool PhysicalKeyDown(int virtual_key) {
     return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
@@ -50,69 +29,224 @@ KBDLLHOOKSTRUCT ReadHookStruct(LPARAM value) {
 
 }  // namespace
 
-WindowsKeyboardHookApp::WindowsKeyboardHookApp(Config config)
-    : config_(config), movement_engine_(config.movement), mouse_(std::make_unique<WindowsMouseController>()) {}
+WindowsKeyboardHookService::WindowsKeyboardHookService(Config config)
+    : config_(config), active_config_(config), movement_engine_(config.movement) {}
 
-WindowsKeyboardHookApp::~WindowsKeyboardHookApp() {
-    EnsureLeftButtonReleased();
-    StopMovementThread();
-    UninstallHook();
+WindowsKeyboardHookService::~WindowsKeyboardHookService() {
+    Stop();
 }
 
-int WindowsKeyboardHookApp::Run() {
-    main_thread_id_ = GetCurrentThreadId();
-    g_app = this;
-    AppendLogLine("Run: starting application");
+bool WindowsKeyboardHookService::Start() {
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    if (running_.load()) {
+        return true;
+    }
+
+    startup_complete_ = false;
+    startup_succeeded_ = false;
+    last_error_.clear();
+
+    const Config config = config_;
+    hook_thread_ = std::thread([this, config]() {
+        ServiceThreadMain(config);
+    });
+
+    startup_cv_.wait(lock, [this]() { return startup_complete_; });
+    const bool success = startup_succeeded_;
+    lock.unlock();
+
+    if (!success && hook_thread_.joinable()) {
+        hook_thread_.join();
+    }
+
+    return success;
+}
+
+bool WindowsKeyboardHookService::Stop() {
+    bool stop_requested = false;
+    const auto stop_event = reinterpret_cast<HANDLE>(stop_event_.load());
+    if (stop_event != nullptr) {
+        if (SetEvent(stop_event)) {
+            stop_requested = true;
+        } else {
+            SetLastError("Failed to signal keyboard hook stop event. SetEvent error: " +
+                         std::to_string(GetLastError()));
+        }
+    }
+
+    const DWORD thread_id = hook_thread_id_.load();
+    if (thread_id != 0) {
+        if (PostThreadMessageW(thread_id, kServiceStopMessage, 0, 0)) {
+            stop_requested = true;
+        } else if (!stop_requested) {
+            SetLastError("Failed to stop keyboard hook thread. PostThreadMessageW error: " +
+                         std::to_string(GetLastError()));
+            return false;
+        }
+    }
+
+    if (!stop_requested && running_.load()) {
+        SetLastError("Failed to stop keyboard hook thread: thread is running but no stop target is available.");
+        return false;
+    }
+
+    if (hook_thread_.joinable()) {
+        hook_thread_.join();
+    }
+
+    return true;
+}
+
+bool WindowsKeyboardHookService::ReloadConfig(const Config& config) {
+    const bool was_running = IsRunning();
+    if (!Stop()) {
+        return false;
+    }
+    SetConfig(config);
+    if (!was_running) {
+        return true;
+    }
+    return Start();
+}
+
+void WindowsKeyboardHookService::SetConfig(const Config& config) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    config_ = config;
+}
+
+Config WindowsKeyboardHookService::CurrentConfig() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return config_;
+}
+
+bool WindowsKeyboardHookService::IsRunning() const {
+    return running_.load();
+}
+
+std::string WindowsKeyboardHookService::LastError() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return last_error_;
+}
+
+void WindowsKeyboardHookService::ServiceThreadMain(Config config) {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        active_config_ = config;
+        startup_complete_ = false;
+        startup_succeeded_ = false;
+    }
+
+    input_state_.Reset();
+    movement_engine_ = MovementEngine(active_config_.movement);
+    mouse_ = std::make_unique<WindowsMouseController>();
+    left_button_held_.store(false);
+    right_click_pending_.store(false);
+    scroll_mode_used_.store(false);
+
+    const HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (stop_event == nullptr) {
+        SetLastError("Failed to create keyboard hook stop event. CreateEventW error: " +
+                     std::to_string(GetLastError()));
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            startup_complete_ = true;
+            startup_succeeded_ = false;
+        }
+        startup_cv_.notify_all();
+        mouse_.reset();
+        return;
+    }
+    stop_event_.store(stop_event);
+
+    MSG queue_probe{};
+    PeekMessageW(&queue_probe, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+    hook_thread_id_.store(GetCurrentThreadId());
+    g_service = this;
 
     if (!InstallHook()) {
-        AppendLogLine("Run: failed to install keyboard hook");
-        std::cerr << "Failed to install keyboard hook\n";
-        return 1;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            startup_complete_ = true;
+            startup_succeeded_ = false;
+        }
+        startup_cv_.notify_all();
+        hook_thread_id_.store(0);
+        g_service = nullptr;
+        stop_event_.store(nullptr);
+        CloseHandle(stop_event);
+        mouse_.reset();
+        return;
     }
 
     running_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        startup_complete_ = true;
+        startup_succeeded_ = true;
+    }
+    startup_cv_.notify_all();
+
     StartMovementThread();
 
     MSG msg{};
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == kQuitMessage) {
+    bool stop_requested = false;
+    while (!stop_requested) {
+        const DWORD wait_result = MsgWaitForMultipleObjects(1, &stop_event, FALSE, INFINITE, QS_ALLINPUT);
+        if (wait_result == WAIT_OBJECT_0) {
             break;
         }
 
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        if (wait_result != WAIT_OBJECT_0 + 1) {
+            SetLastError("Keyboard hook message loop wait failed. MsgWaitForMultipleObjects result: " +
+                         std::to_string(wait_result));
+            break;
+        }
+
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == kServiceStopMessage) {
+                stop_requested = true;
+                break;
+            }
+
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
     running_.store(false);
+    EnsureLeftButtonReleased();
     StopMovementThread();
     UninstallHook();
-    g_app = nullptr;
-    return 0;
+    mouse_.reset();
+    hook_thread_id_.store(0);
+    g_service = nullptr;
+    stop_event_.store(nullptr);
+    CloseHandle(stop_event);
 }
 
-bool WindowsKeyboardHookApp::InstallHook() {
+bool WindowsKeyboardHookService::InstallHook() {
     HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, HookProc, GetModuleHandleW(nullptr), 0);
     if (hook == nullptr) {
-        AppendLogLine("InstallHook: SetWindowsHookExW returned null");
+        SetLastError("Failed to install keyboard hook");
         return false;
     }
 
     hook_ = hook;
-    AppendLogLine("InstallHook: keyboard hook installed");
     return true;
 }
 
-void WindowsKeyboardHookApp::UninstallHook() {
+void WindowsKeyboardHookService::UninstallHook() {
     if (hook_ != nullptr) {
         UnhookWindowsHookEx(reinterpret_cast<HHOOK>(hook_));
         hook_ = nullptr;
-        AppendLogLine("UninstallHook: keyboard hook removed");
     }
 }
 
-void WindowsKeyboardHookApp::StartMovementThread() {
+void WindowsKeyboardHookService::StartMovementThread() {
     movement_thread_ = std::thread([this]() {
-        const auto tick_interval = std::chrono::duration<double>(1.0 / static_cast<double>(config_.movement.update_rate_hz));
+        const auto tick_interval =
+            std::chrono::duration<double>(1.0 / static_cast<double>(active_config_.movement.update_rate_hz));
         auto last_drag_tick = std::chrono::steady_clock::now();
         auto last_scroll_tick = std::chrono::steady_clock::now();
 
@@ -126,17 +260,16 @@ void WindowsKeyboardHookApp::StartMovementThread() {
                 continue;
             }
 
-            if (IsConfiguredKeyDown(config_.bindings.right_click)) {
+            if (IsConfiguredKeyDown(active_config_.bindings.right_click)) {
                 const auto now = std::chrono::steady_clock::now();
                 const auto scroll_interval = std::chrono::duration<double>(
-                    1.0 / static_cast<double>(config_.movement.scroll_update_rate_hz));
+                    1.0 / static_cast<double>(active_config_.movement.scroll_update_rate_hz));
                 if (now - last_scroll_tick >= scroll_interval) {
-                    if (IsConfiguredKeyDown(config_.bindings.up)) {
+                    if (IsConfiguredKeyDown(active_config_.bindings.up)) {
                         scroll_mode_used_.store(true);
                         mouse_->ScrollVertical(static_cast<int>(kWheelDelta));
                         last_scroll_tick = now;
-                    }
-                    if (IsConfiguredKeyDown(config_.bindings.down)) {
+                    } else if (IsConfiguredKeyDown(active_config_.bindings.down)) {
                         scroll_mode_used_.store(true);
                         mouse_->ScrollVertical(-static_cast<int>(kWheelDelta));
                         last_scroll_tick = now;
@@ -152,7 +285,7 @@ void WindowsKeyboardHookApp::StartMovementThread() {
             const auto now = std::chrono::steady_clock::now();
             if (dragging) {
                 const auto drag_interval = std::chrono::duration<double>(
-                    1.0 / static_cast<double>(config_.movement.drag_update_rate_hz));
+                    1.0 / static_cast<double>(active_config_.movement.drag_update_rate_hz));
                 if (now - last_drag_tick < drag_interval) {
                     std::this_thread::sleep_for(tick_interval);
                     continue;
@@ -163,12 +296,12 @@ void WindowsKeyboardHookApp::StartMovementThread() {
             }
 
             const auto delta = movement_engine_.Tick(
-                IsConfiguredKeyDown(config_.bindings.up),
-                IsConfiguredKeyDown(config_.bindings.down),
-                IsConfiguredKeyDown(config_.bindings.left),
-                IsConfiguredKeyDown(config_.bindings.right));
+                IsConfiguredKeyDown(active_config_.bindings.up),
+                IsConfiguredKeyDown(active_config_.bindings.down),
+                IsConfiguredKeyDown(active_config_.bindings.left),
+                IsConfiguredKeyDown(active_config_.bindings.right));
 
-            if (delta.dx != 0 || delta.dy != 0) {
+            if ((delta.dx != 0 || delta.dy != 0) && mouse_ != nullptr) {
                 mouse_->MoveBy(delta.dx, delta.dy);
             }
 
@@ -177,56 +310,54 @@ void WindowsKeyboardHookApp::StartMovementThread() {
     });
 }
 
-void WindowsKeyboardHookApp::StopMovementThread() {
-    running_.store(false);
+void WindowsKeyboardHookService::StopMovementThread() {
     if (movement_thread_.joinable()) {
         movement_thread_.join();
     }
 }
 
-void WindowsKeyboardHookApp::HandleKeyDown(int virtual_key) {
+void WindowsKeyboardHookService::HandleKeyDown(int virtual_key) {
     const bool first_press = input_state_.OnKeyDown(virtual_key);
 
     if (!IsControlModeActive() || !first_press) {
         return;
     }
 
-    if (virtual_key == config_.bindings.left_click) {
-        AppendLogLine("HandleKeyDown: left button down");
+    if (virtual_key == active_config_.bindings.left_click) {
         mouse_->LeftDown();
         left_button_held_.store(true);
-    } else if (virtual_key == config_.bindings.right_click) {
+    } else if (virtual_key == active_config_.bindings.right_click) {
         right_click_pending_.store(true);
         scroll_mode_used_.store(false);
     }
 }
 
-void WindowsKeyboardHookApp::HandleKeyUp(int virtual_key) {
+void WindowsKeyboardHookService::HandleKeyUp(int virtual_key) {
     const bool was_down = input_state_.OnKeyUp(virtual_key);
     if (!was_down) {
         return;
     }
 
-    if (virtual_key == config_.bindings.left_click || virtual_key == config_.activation_modifier) {
+    if (virtual_key == active_config_.bindings.left_click || virtual_key == active_config_.activation_modifier) {
         EnsureLeftButtonReleased();
     }
 
-    if (virtual_key == config_.bindings.right_click) {
+    if (virtual_key == active_config_.bindings.right_click) {
         const bool right_click_pending = right_click_pending_.exchange(false);
         const bool scroll_mode_used = scroll_mode_used_.exchange(false);
-        if (right_click_pending && !scroll_mode_used && IsConfiguredKeyDown(config_.activation_modifier)) {
-            AppendLogLine("HandleKeyUp: right click fired");
+        if (right_click_pending && !scroll_mode_used && IsConfiguredKeyDown(active_config_.activation_modifier) &&
+            mouse_ != nullptr) {
             mouse_->RightClick();
         }
     }
 }
 
-bool WindowsKeyboardHookApp::ShouldSuppress(int virtual_key) const {
+bool WindowsKeyboardHookService::ShouldSuppress(int virtual_key) const {
     if (IsEmergencyQuitPressed()) {
         return true;
     }
 
-    if (virtual_key == config_.activation_modifier) {
+    if (virtual_key == active_config_.activation_modifier) {
         return true;
     }
 
@@ -234,21 +365,21 @@ bool WindowsKeyboardHookApp::ShouldSuppress(int virtual_key) const {
         return false;
     }
 
-    if (virtual_key == config_.bindings.right_click) {
+    if (virtual_key == active_config_.bindings.right_click) {
         return true;
     }
 
-    if (IsConfiguredKeyDown(config_.bindings.right_click) &&
-        (virtual_key == config_.bindings.up || virtual_key == config_.bindings.down)) {
+    if (IsConfiguredKeyDown(active_config_.bindings.right_click) &&
+        (virtual_key == active_config_.bindings.up || virtual_key == active_config_.bindings.down)) {
         return true;
     }
 
-    return virtual_key == config_.bindings.up || virtual_key == config_.bindings.down ||
-           virtual_key == config_.bindings.left || virtual_key == config_.bindings.right ||
-           virtual_key == config_.bindings.left_click;
+    return virtual_key == active_config_.bindings.up || virtual_key == active_config_.bindings.down ||
+           virtual_key == active_config_.bindings.left || virtual_key == active_config_.bindings.right ||
+           virtual_key == active_config_.bindings.left_click;
 }
 
-bool WindowsKeyboardHookApp::IsEmergencyQuitPressed() const {
+bool WindowsKeyboardHookService::IsEmergencyQuitPressed() const {
     return (IsConfiguredKeyDown(*ParseVirtualKeyName("LeftCtrl")) ||
             IsConfiguredKeyDown(*ParseVirtualKeyName("RightCtrl"))) &&
            (IsConfiguredKeyDown(*ParseVirtualKeyName("LeftAlt")) ||
@@ -256,7 +387,7 @@ bool WindowsKeyboardHookApp::IsEmergencyQuitPressed() const {
            IsConfiguredKeyDown(*ParseVirtualKeyName("Escape"));
 }
 
-bool WindowsKeyboardHookApp::IsConfiguredKeyDown(int configured_virtual_key) const {
+bool WindowsKeyboardHookService::IsConfiguredKeyDown(int configured_virtual_key) const {
     if (PhysicalKeyDown(configured_virtual_key) || input_state_.IsDown(configured_virtual_key)) {
         return true;
     }
@@ -272,33 +403,30 @@ bool WindowsKeyboardHookApp::IsConfiguredKeyDown(int configured_virtual_key) con
     return false;
 }
 
-bool WindowsKeyboardHookApp::IsControlModeActive() const {
-    return IsConfiguredKeyDown(config_.activation_modifier);
+bool WindowsKeyboardHookService::IsControlModeActive() const {
+    return IsConfiguredKeyDown(active_config_.activation_modifier);
 }
 
-void WindowsKeyboardHookApp::EnsureLeftButtonReleased() {
-    if (left_button_held_.exchange(false)) {
-        AppendLogLine("EnsureLeftButtonReleased: left button up");
+void WindowsKeyboardHookService::EnsureLeftButtonReleased() {
+    if (left_button_held_.exchange(false) && mouse_ != nullptr) {
         mouse_->LeftUp();
     }
 }
 
-void WindowsKeyboardHookApp::RequestQuit() {
-    running_.store(false);
+void WindowsKeyboardHookService::RequestQuit() {
     EnsureLeftButtonReleased();
-    AppendLogLine("RequestQuit: emergency quit requested");
-    PostThreadMessageW(main_thread_id_, kQuitMessage, 0, 0);
+    const DWORD thread_id = hook_thread_id_.load();
+    if (thread_id != 0) {
+        PostThreadMessageW(thread_id, kServiceStopMessage, 0, 0);
+    }
 }
 
-void WindowsKeyboardHookApp::PrintStartupSummary() const {
-    std::cout << "mouse_mode=hold " << VirtualKeyName(config_.activation_modifier) << '\n';
-    std::cout << "bindings=arrows move, " << VirtualKeyName(config_.bindings.left_click)
-              << " left click, " << VirtualKeyName(config_.bindings.right_click) << " right click\n";
+void WindowsKeyboardHookService::SetLastError(const std::string& error) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    last_error_ = error;
 }
 
-int WindowsKeyboardHookApp::NormalizeVirtualKey(DWORD vk_code, DWORD scan_code, DWORD flags) {
-    // Some layouts/IMEs report the right control physical key with a non-control
-    // virtual-key code but keep the standard control scan code.
+int WindowsKeyboardHookService::NormalizeVirtualKey(DWORD vk_code, DWORD scan_code, DWORD flags) {
     if (scan_code == 0x1D) {
         return (flags & LLKHF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
     }
@@ -310,50 +438,36 @@ int WindowsKeyboardHookApp::NormalizeVirtualKey(DWORD vk_code, DWORD scan_code, 
     if (vk_code == VK_CONTROL) {
         return (flags & LLKHF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
     }
+
     if (vk_code == VK_MENU) {
         return (flags & LLKHF_EXTENDED) ? VK_RMENU : VK_LMENU;
     }
-    return vk_code;
+
+    return static_cast<int>(vk_code);
 }
 
-LRESULT CALLBACK WindowsKeyboardHookApp::HookProc(int code, WPARAM w_param, LPARAM l_param) {
-    if (code < 0 || g_app == nullptr) {
+LRESULT CALLBACK WindowsKeyboardHookService::HookProc(int code, WPARAM w_param, LPARAM l_param) {
+    if (code < 0 || g_service == nullptr) {
         return CallNextHookEx(nullptr, code, w_param, l_param);
     }
 
     const auto info = ReadHookStruct(l_param);
-    const int virtual_key = static_cast<int>(NormalizeVirtualKey(info.vkCode, info.scanCode, info.flags));
+    const int virtual_key = NormalizeVirtualKey(info.vkCode, info.scanCode, info.flags);
 
     const bool is_key_down = w_param == WM_KEYDOWN || w_param == WM_SYSKEYDOWN;
     const bool is_key_up = w_param == WM_KEYUP || w_param == WM_SYSKEYUP;
-    const bool control_mode_active = g_app->IsControlModeActive();
-    const bool suppress = g_app->ShouldSuppress(virtual_key);
-
-    {
-        std::ostringstream line;
-        line << "HookProc:"
-             << " w_param=" << static_cast<unsigned long long>(w_param)
-             << " raw_vk=" << info.vkCode
-             << " normalized_vk=" << virtual_key
-             << " scan=" << info.scanCode
-             << " flags=0x" << std::hex << info.flags << std::dec
-             << " key_name=" << VirtualKeyName(virtual_key)
-             << " ctrl_mode=" << (control_mode_active ? "1" : "0")
-             << " suppress=" << (suppress ? "1" : "0");
-        AppendLogLine(line.str());
-    }
 
     if (is_key_down) {
-        g_app->HandleKeyDown(virtual_key);
-        if (g_app->IsEmergencyQuitPressed()) {
-            g_app->RequestQuit();
+        g_service->HandleKeyDown(virtual_key);
+        if (g_service->IsEmergencyQuitPressed()) {
+            g_service->RequestQuit();
             return 1;
         }
     } else if (is_key_up) {
-        g_app->HandleKeyUp(virtual_key);
+        g_service->HandleKeyUp(virtual_key);
     }
 
-    if (suppress) {
+    if (g_service->ShouldSuppress(virtual_key)) {
         return 1;
     }
 

@@ -36,9 +36,16 @@ struct ConfigLoadResult {
     std::string message;
 };
 
+struct ConfigSaveResult {
+    bool success;
+    std::string message;
+};
+
 Config DefaultConfig();
 ConfigLoadResult ParseConfigText(const std::string& text);
+std::string SerializeConfig(const Config& config);
 ConfigLoadResult LoadConfigFile(const std::filesystem::path& path);
+ConfigSaveResult SaveConfigFile(const std::filesystem::path& path, const Config& config);
 std::string DescribeConfig(const Config& config);
 
 }  // namespace arrower

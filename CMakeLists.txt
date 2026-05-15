@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(arrower_core
+    src/app_paths.cpp
     src/config.cpp
     src/input_state.cpp
     src/key_codes.cpp
@@ -20,22 +21,38 @@ target_include_directories(arrower_core
 )
 
 if(WIN32)
-    add_executable(arrower
-        src/main.cpp
-        src/windows_keyboard_hook.cpp
-        src/windows_mouse_controller.cpp
-    )
+    find_package(Qt6 COMPONENTS Widgets QUIET)
 
-    target_link_libraries(arrower
-        PRIVATE
-            arrower_core
-            user32
-    )
+    if(Qt6_FOUND)
+        set(CMAKE_AUTOMOC ON)
+        add_executable(arrower WIN32
+            src/main.cpp
+            src/binding_capture_button.hpp
+            src/binding_capture_button.cpp
+            src/settings_window.hpp
+            src/settings_window.cpp
+            src/tray_application.hpp
+            src/tray_application.cpp
+            src/windows_keyboard_hook.cpp
+            src/windows_mouse_controller.cpp
+        )
 
-    target_compile_definitions(arrower PRIVATE UNICODE _UNICODE)
+        target_include_directories(arrower PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
-    if(MINGW)
-        target_link_options(arrower PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_libraries(arrower
+            PRIVATE
+                arrower_core
+                Qt6::Widgets
+                user32
+        )
+
+        target_compile_definitions(arrower PRIVATE UNICODE _UNICODE)
+
+        if(MINGW)
+            target_link_options(arrower PRIVATE -static -static-libgcc -static-libstdc++)
+        endif()
+    else()
+        message(WARNING "Qt6 Widgets not found; skipping the arrower tray UI target.")
     endif()
 endif()
 
@@ -46,6 +63,7 @@ if(ARROWER_BUILD_TESTS)
 
     add_executable(arrower_tests
         tests/config_tests.cpp
+        tests/key_codes_tests.cpp
         tests/movement_engine_tests.cpp
         tests/input_state_tests.cpp
     )

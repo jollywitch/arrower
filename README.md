@@ -1,6 +1,6 @@
 # arrower
 
-`arrower` is a Windows console utility that lets you control the mouse with the keyboard while holding `Right Ctrl`.
+`arrower` is a Windows tray utility that lets you control the mouse with the keyboard while holding `Right Ctrl`.
 
 ## Default controls
 
@@ -20,14 +20,14 @@ The default movement loop runs at `120 Hz` with:
 
 ## Build
 
-### Windows / MinGW-w64
+### Windows / MinGW-w64 with Qt 6 Widgets
 
 ```bash
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build
 ```
 
-MinGW builds are linked statically against `libgcc`, `libstdc++`, and `winpthread`, so `arrower.exe` should not require those MinGW DLLs beside the executable.
+The Windows app target requires `Qt 6 Widgets`. MinGW builds are linked statically against `libgcc`, `libstdc++`, and `winpthread`, so `arrower.exe` should not require those MinGW DLLs beside the executable.
 
 ### Tests
 
@@ -41,7 +41,7 @@ On non-Windows hosts, only the cross-platform core and tests are built.
 
 ## Config
 
-`arrower` looks for `config.json` next to the executable. If the file is missing, built-in defaults are used.
+`arrower` looks for `config.json` next to the executable. The tray UI reads and writes this file directly; if the file is missing, built-in defaults are used.
 
 Example:
 
