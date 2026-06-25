@@ -20,14 +20,14 @@ The default movement loop runs at `120 Hz` with:
 
 ## Build
 
-### Windows / MinGW-w64 with Qt 6 Widgets
+### Windows / MSVC with Qt 6 Widgets
 
 ```bash
-cmake -S . -B build -G "MinGW Makefiles"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-The Windows app target requires `Qt 6 Widgets`. MinGW builds are linked statically against `libgcc`, `libstdc++`, and `winpthread`, so `arrower.exe` should not require those MinGW DLLs beside the executable.
+The Windows app target requires `Qt 6 Widgets`. Release builds use the Visual Studio C++ toolchain with the Qt MSVC package.
 
 ### Tests
 
@@ -44,9 +44,9 @@ On non-Windows hosts, only the cross-platform core and tests are built.
 Windows releases publish:
 
 - `arrower-<version>-windows-x64-setup.exe`: recommended per-user installer
-- `arrower-<version>-windows-x64.zip`: portable build with Qt and MinGW runtime DLLs
+- `arrower-<version>-windows-x64.zip`: portable build with Qt and runtime DLLs
 
-The standalone `arrower.exe` is not intended to be distributed by itself because the Qt and MinGW runtime files must be available beside it.
+The standalone `arrower.exe` is not intended to be distributed by itself because the Qt and runtime files must be available beside it.
 
 Tags starting with `test-` publish a draft pre-release so maintainers can download and verify the installer before making a public release.
 

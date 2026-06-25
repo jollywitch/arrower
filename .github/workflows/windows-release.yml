@@ -17,98 +17,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up MSYS2
-        uses: msys2/setup-msys2@v2
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Qt
+        uses: jurplel/install-qt-action@v4
         with:
-          msystem: MINGW64
-          update: true
           cache: true
-          install: >-
-            git
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-qt6-base
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+
+      - name: Set up packaging tools
+        shell: pwsh
+        run: choco install ninja innosetup -y --no-progress
 
       - name: Configure
-        shell: msys2 {0}
+        shell: pwsh
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DARROWER_BUILD_TESTS=ON
 
       - name: Build
-        shell: msys2 {0}
+        shell: pwsh
         run: cmake --build build --target arrower arrower_tests
 
       - name: Test
-        shell: msys2 {0}
+        shell: pwsh
         run: ctest --test-dir build --output-on-failure
 
-      - name: Set up Inno Setup
-        shell: pwsh
-        run: choco install innosetup -y --no-progress
-
       - name: Stage application
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          dist="dist/arrower-${{ github.ref_name }}-windows-x64"
-          mkdir -p "$dist"
-          cp build/arrower.exe "$dist/"
-          cp config.json "$dist/"
+          $version = "${{ github.ref_name }}"
+          $dist = "dist/arrower-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "build/arrower.exe" $dist
+          Copy-Item "config.json" $dist
+
           windeployqt "$dist/arrower.exe" --release --no-translations --compiler-runtime
 
-          declare -A processed=()
-
-          find_mingw_dll() {
-            local dll="$1"
-            local exact="${MINGW_PREFIX}/bin/${dll}"
-            if [[ -f "$exact" ]]; then
-              printf '%s\n' "$exact"
-              return 0
-            fi
-
-            find "${MINGW_PREFIX}/bin" -maxdepth 1 -iname "$dll" -print -quit
+          $mingwDlls = @(
+            "libgcc_s_seh-1.dll",
+            "libstdc++-6.dll",
+            "libwinpthread-1.dll"
+          )
+          $packagedDlls = Get-ChildItem $dist -Recurse -Filter "*.dll" | ForEach-Object { $_.Name.ToLowerInvariant() }
+          $unexpected = $mingwDlls | Where-Object { $packagedDlls -contains $_ }
+          if ($unexpected) {
+            throw "MSVC package unexpectedly contains MinGW runtime DLLs: $($unexpected -join ', ')"
           }
 
-          queue_binary() {
-            local binary="$1"
-            local key
-            key="$(cygpath -m "$binary" | tr '[:upper:]' '[:lower:]')"
-            if [[ -n "${processed[$key]:-}" ]]; then
-              return
-            fi
-            processed[$key]=queued
-            queue+=("$binary")
-          }
-
-          queue=()
-          while IFS= read -r binary; do
-            queue_binary "$binary"
-          done < <(find "$dist" -type f \( -iname '*.exe' -o -iname '*.dll' \))
-
-          while ((${#queue[@]})); do
-            binary="${queue[0]}"
-            queue=("${queue[@]:1}")
-
-            while IFS= read -r dll; do
-              dll="${dll//$'\r'/}"
-              [[ -n "$dll" ]] || continue
-
-              existing="$(find "$dist" -maxdepth 1 -iname "$dll" -print -quit)"
-              if [[ -n "$existing" ]]; then
-                queue_binary "$existing"
-                continue
-              fi
-
-              source_path="$(find_mingw_dll "$dll")"
-              if [[ -z "$source_path" ]]; then
-                continue
-              fi
-
-              echo "Copying runtime dependency: ${dll}"
-              cp -f "$source_path" "$dist/"
-              queue_binary "$dist/$(basename "$source_path")"
-            done < <(x86_64-w64-mingw32-objdump -p "$binary" | sed -n 's/^[[:space:]]*DLL Name: //p')
-          done
+          Write-Host "Packaged top-level DLLs:"
+          Get-ChildItem $dist -File -Filter "*.dll" | Sort-Object Name | ForEach-Object { $_.Name }
 
       - name: Package application
         shell: pwsh
