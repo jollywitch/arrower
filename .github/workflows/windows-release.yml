@@ -42,6 +42,10 @@ jobs:
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure
 
+      - name: Set up NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
       - name: Stage application
         shell: msys2 {0}
         run: |
@@ -52,21 +56,52 @@ jobs:
           cp config.json "$dist/"
           windeployqt "$dist/arrower.exe" --release --no-translations --compiler-runtime
 
+          runtime_dlls=(
+            libgcc_s_seh-1.dll
+            libstdc++-6.dll
+            libwinpthread-1.dll
+          )
+
+          for dll in "${runtime_dlls[@]}"; do
+            source_path="${MINGW_PREFIX}/bin/${dll}"
+            if [[ ! -f "$source_path" ]]; then
+              echo "Missing MinGW runtime DLL: $source_path" >&2
+              exit 1
+            fi
+            cp -f "$source_path" "$dist/"
+          done
+
       - name: Package application
         shell: pwsh
         run: Compress-Archive -Path "dist/arrower-${{ github.ref_name }}-windows-x64/*" -DestinationPath "dist/arrower-${{ github.ref_name }}-windows-x64.zip" -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $dist = (Resolve-Path "dist/arrower-$version-windows-x64").Path
+          $output = (Join-Path (Resolve-Path "dist").Path "arrower-$version-windows-x64-setup.exe")
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" `
+            "/DAPP_VERSION=$version" `
+            "/DDIST_DIR=$dist" `
+            "/DOUTPUT_FILE=$output" `
+            "packaging/windows/arrower.nsi"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: arrower-${{ github.ref_name }}-windows-x64
-          path: dist/arrower-${{ github.ref_name }}-windows-x64.zip
+          path: |
+            dist/arrower-${{ github.ref_name }}-windows-x64.zip
+            dist/arrower-${{ github.ref_name }}-windows-x64-setup.exe
           if-no-files-found: error
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: arrower ${{ github.ref_name }}
+          draft: ${{ startsWith(github.ref_name, 'test-') }}
+          prerelease: ${{ startsWith(github.ref_name, 'test-') }}
           files: |
             dist/arrower-${{ github.ref_name }}-windows-x64.zip
-            dist/arrower-${{ github.ref_name }}-windows-x64/arrower.exe
+            dist/arrower-${{ github.ref_name }}-windows-x64-setup.exe

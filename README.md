@@ -39,6 +39,17 @@ ctest --test-dir build --output-on-failure
 
 On non-Windows hosts, only the cross-platform core and tests are built.
 
+## Release artifacts
+
+Windows releases publish:
+
+- `arrower-<version>-windows-x64-setup.exe`: recommended per-user installer
+- `arrower-<version>-windows-x64.zip`: portable build with Qt and MinGW runtime DLLs
+
+The standalone `arrower.exe` is not intended to be distributed by itself because the Qt and MinGW runtime files must be available beside it.
+
+Tags starting with `test-` publish a draft pre-release so maintainers can download and verify the installer before making a public release.
+
 ## Config
 
 `arrower` looks for `config.json` next to the executable. The tray UI reads and writes this file directly; if the file is missing, built-in defaults are used.
