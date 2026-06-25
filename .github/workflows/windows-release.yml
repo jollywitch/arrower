@@ -56,19 +56,58 @@ jobs:
           cp config.json "$dist/"
           windeployqt "$dist/arrower.exe" --release --no-translations --compiler-runtime
 
-          runtime_dlls=(
-            libgcc_s_seh-1.dll
-            libstdc++-6.dll
-            libwinpthread-1.dll
-          )
+          declare -A processed=()
 
-          for dll in "${runtime_dlls[@]}"; do
-            source_path="${MINGW_PREFIX}/bin/${dll}"
-            if [[ ! -f "$source_path" ]]; then
-              echo "Missing MinGW runtime DLL: $source_path" >&2
-              exit 1
+          find_mingw_dll() {
+            local dll="$1"
+            local exact="${MINGW_PREFIX}/bin/${dll}"
+            if [[ -f "$exact" ]]; then
+              printf '%s\n' "$exact"
+              return 0
             fi
-            cp -f "$source_path" "$dist/"
+
+            find "${MINGW_PREFIX}/bin" -maxdepth 1 -iname "$dll" -print -quit
+          }
+
+          queue_binary() {
+            local binary="$1"
+            local key
+            key="$(cygpath -m "$binary" | tr '[:upper:]' '[:lower:]')"
+            if [[ -n "${processed[$key]:-}" ]]; then
+              return
+            fi
+            processed[$key]=queued
+            queue+=("$binary")
+          }
+
+          queue=()
+          while IFS= read -r binary; do
+            queue_binary "$binary"
+          done < <(find "$dist" -type f \( -iname '*.exe' -o -iname '*.dll' \))
+
+          while ((${#queue[@]})); do
+            binary="${queue[0]}"
+            queue=("${queue[@]:1}")
+
+            while IFS= read -r dll; do
+              dll="${dll//$'\r'/}"
+              [[ -n "$dll" ]] || continue
+
+              existing="$(find "$dist" -maxdepth 1 -iname "$dll" -print -quit)"
+              if [[ -n "$existing" ]]; then
+                queue_binary "$existing"
+                continue
+              fi
+
+              source_path="$(find_mingw_dll "$dll")"
+              if [[ -z "$source_path" ]]; then
+                continue
+              fi
+
+              echo "Copying runtime dependency: ${dll}"
+              cp -f "$source_path" "$dist/"
+              queue_binary "$dist/$(basename "$source_path")"
+            done < <(x86_64-w64-mingw32-objdump -p "$binary" | sed -n 's/^[[:space:]]*DLL Name: //p')
           done
 
       - name: Package application
@@ -102,6 +141,7 @@ jobs:
           name: arrower ${{ github.ref_name }}
           draft: ${{ startsWith(github.ref_name, 'test-') }}
           prerelease: ${{ startsWith(github.ref_name, 'test-') }}
+          overwrite_files: true
           files: |
             dist/arrower-${{ github.ref_name }}-windows-x64.zip
             dist/arrower-${{ github.ref_name }}-windows-x64-setup.exe
