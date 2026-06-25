@@ -42,9 +42,9 @@ jobs:
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure
 
-      - name: Set up NSIS
+      - name: Set up Inno Setup
         shell: pwsh
-        run: choco install nsis -y --no-progress
+        run: choco install innosetup -y --no-progress
 
       - name: Stage application
         shell: msys2 {0}
@@ -80,12 +80,12 @@ jobs:
         run: |
           $version = "${{ github.ref_name }}"
           $dist = (Resolve-Path "dist/arrower-$version-windows-x64").Path
-          $output = (Join-Path (Resolve-Path "dist").Path "arrower-$version-windows-x64-setup.exe")
-          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" `
-            "/DAPP_VERSION=$version" `
-            "/DDIST_DIR=$dist" `
-            "/DOUTPUT_FILE=$output" `
-            "packaging/windows/arrower.nsi"
+          $outputDir = (Resolve-Path "dist").Path
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=$version" `
+            "/DSourceDir=$dist" `
+            "/DOutputDir=$outputDir" `
+            "packaging/windows/arrower.iss"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
